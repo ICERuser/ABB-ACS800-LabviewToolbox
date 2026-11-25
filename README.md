@@ -1,11 +1,50 @@
-# Wind Turbine Emulator – ABB ACS800 (DTC) via RETA-01 Modbus/TCP
+<div align="center">
 
-A Java application (JDK 17+, **no external libraries**) that turns an ACS800-driven induction motor into a
-wind turbine emulator. It computes the aerodynamic behaviour of a real turbine in real time and commands the
-drive through the RETA-01 Ethernet adapter over Modbus/TCP. The motor then drives a generator test bench
-just as a turbine rotor would.
+# 🌬️ Wind Turbine Emulator for ABB ACS800
 
-![GUI](docs/screenshot.png)
+**Turn an ACS800 DTC drive and an induction motor into a real-time wind turbine emulator over Modbus/TCP (RETA-01).**
+
+![Java](https://img.shields.io/badge/Java-17%2B-orange?logo=openjdk)
+![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+![Protocol](https://img.shields.io/badge/protocol-Modbus%2FTCP-blue)
+![Drive](https://img.shields.io/badge/drive-ABB%20ACS800%20%2B%20RETA--01-red)
+![Status](https://img.shields.io/badge/status-tested%20in%20simulation-yellow)
+
+<img src="docs/screenshot.png" alt="Emulator GUI" width="900">
+
+</div>
+
+---
+
+## About
+
+This project is for test benches where an **ABB ACS800** inverter drives an induction motor coupled to a
+generator. A PC program reads the shaft speed and torque from the drive through the **RETA-01 Ethernet
+adapter**. Every 20 ms it calculates how a real wind turbine rotor would behave in the current wind and sends
+the result back to the drive as a speed or torque reference. The generator then "sees" a wind turbine, so
+you can test generator control, MPPT, converters and grid-side behaviour in the lab without a real turbine.
+
+Everything is plain Java: the Modbus/TCP client, the physics, the Swing GUI and the charts. There are no
+external libraries. A built-in drive simulator lets you try it without any hardware.
+
+## ✨ Features
+
+- **Realistic wind:** mean speed set with a slider or loaded from a CSV profile, plus turbulence, gusts and lulls
+- **Turbine aerodynamics:** Cp(λ, β) power-coefficient model, start-up torque and 3P tower-shadow ripple
+- **Pitch control:** gain-scheduled PI speed limiter, start-up speed ramp (limits overshoot), rate limit, feathering at cut-out and on stop, manual mode
+- **Scaling:** maps a MW-class turbine (default 1.5 MW, 77 m rotor) onto a kW lab motor, including its inertia
+- **Two emulation modes**
+  - **SPEED** (recommended): a virtual rotor runs on the PC, stable for any inertia ratio
+  - **TORQUE**: observer-based inertia emulation with a DTC torque reference
+- **ABB Drives profile:** full start sequence (0x0476 → 0x047F), fault reset, OFF1 ramp stop and OFF3 emergency stop
+- **Safety supervision:** overspeed trip, torque limit and ramp, comms-loss detection, start timeout, REMOTE check
+- **Operator GUI:** live values, decoded status word and three trend charts
+- **Headless mode:** run from the command line and get a printed table
+- **CSV logging:** every running cycle is logged
+- **Offline simulator:** a virtual ACS800 + bench, so you can develop and demo without hardware
+- **LabVIEW DLL:** native 32/64-bit `windemu` DLL with the same engine, configured and read through clusters (see [`labview/`](labview/LABVIEW.md))
+
+## 🏗️ How it works
 
 ```
  ┌──────────────── PC (this program, 20 ms cycle) ────────────────┐          ┌─────────── test bench ───────────┐
@@ -17,142 +56,185 @@ just as a turbine rotor would.
                                                                               └──────────────────────────────────┘
 ```
 
-## Quick start
+Turbine quantities are scaled to the motor shaft so that per-unit power, speed and stored energy are
+preserved:
+
+| Quantity | Scaling |
+|---|---|
+| Speed | ω_motor = G · ω_rotor |
+| Power | P_motor = k_p · P_turbine |
+| Torque | T_motor = T_rotor · k_p / G |
+| Inertia | J_motor = J_rotor · k_p / G² |
+
+With the default settings (a 1.5 MW turbine at 20 rpm on a 15 kW / 1475 rpm motor), G = 73.75 and
+k_p = 0.008. The rated rotor torque of 716 kNm becomes 77.7 Nm at the motor (80 % of nominal), and the rotor
+inertia of 4·10⁶ kgm² becomes 5.9 kgm².
+
+## 🚀 Quick start
+
+**Requirements:** JDK 17 or newer. Maven is optional.
 
 ```bash
-./build.sh                      # or build.bat on Windows, or: mvn package
-java -jar wind-emulator.jar emulator.properties --sim          # offline, built-in drive simulator
-java -jar wind-emulator.jar emulator.properties --real --host 192.168.0.16
-java -jar wind-emulator.jar emulator.properties --sim --headless 120   # no GUI, prints a table
+git clone https://github.com/<your-user>/wind-emulator.git
+cd wind-emulator
+./build.sh                       # Windows: build.bat   |   or: mvn package
 ```
 
-In the GUI: **Connect → Start**. Use the sliders for wind speed and turbulence and the gust buttons to disturb
-it, or load a CSV wind profile (`wind_profile_example.csv`). **Stop** feathers the blades, waits for the rotor
-to slow down, then issues OFF1. **EMERGENCY STOP** issues OFF3. Every running cycle is logged to
-`emulator_log.csv`.
+```bash
+# 1) Try it without hardware (built-in ACS800 simulator)
+java -jar wind-emulator.jar emulator.properties --sim
 
-## What is modelled
+# 2) Connect to the real drive
+java -jar wind-emulator.jar emulator.properties --real --host 192.168.0.16
 
-| Block | Model |
+# 3) No GUI: connect, start, run for 120 s, print values, stop
+java -jar wind-emulator.jar emulator.properties --sim --headless 120
+```
+
+| Option | Meaning |
 |---|---|
-| Wind | Mean value (slider or CSV, looped) + Gauss-Markov turbulence (σ = I·v, τ = L/v) + IEC-style 1-cos gusts |
-| Aerodynamics | Heier/Slootweg Cp(λ,β): Cp,max = 0.48 at λ = 8.1; T = ½ρπR³v²·Cp/λ; finite start-up torque; 3P tower-shadow dip |
-| Pitch | PI speed limiter above rated rotor speed, 8°/s rate limit, feathers above cut-out and on stop; manual mode |
-| Rotor inertia | Full turbine inertia reflected to the motor shaft (see modes below) |
-| Scaling | ω_motor = G·ω_rotor, P_motor = k_p·P_turbine, T_motor = T_rotor·k_p/G, J_motor = J_rotor·k_p/G² |
-| Drive | ABB Drives profile state machine (0x0476 → 0x047F), fault reset (bit 7 edge), OFF1/OFF3 |
-| Safety | Software overspeed → OFF3, torque limit and ramp, comms-loss supervision, start timeout, REMOTE check |
+| `--sim` / `--real` | Use the built-in simulator or the real RETA-01 |
+| `--host IP` | RETA-01 IP address |
+| `--mode SPEED\|TORQUE` | Emulation mode |
+| `--headless N` | Run N seconds without the GUI |
 
-The default turbine is a 1.5 MW, 77 m rotor at 20 rpm, mapped onto a 15 kW / 1475 rpm motor. With these
-values the program prints: G = 73.75, k_p = 0.008, rated rotor torque 716 kNm → 77.7 Nm at the motor
-(80 % of T_nom), and a turbine inertia of 4·10⁶ kgm² → 5.9 kgm² at the motor shaft.
+In the GUI: **Connect → Start**. Move the wind slider and try **Gust +5 m/s**. **Stop** feathers the blades
+and waits for the rotor to slow down. **EMERGENCY STOP** sends OFF3.
 
-## Emulation modes (`emulator.controlMode`)
+All settings (IP address, motor data, turbine, scaling, pitch gains, safety limits) are in
+[`emulator.properties`](emulator.properties), and each one is commented.
 
-**SPEED (default, recommended).** The ACS800 runs in speed control (EXT1, REF1). The PC integrates the
-virtual rotor, J_rotor·dω/dt = T_aero − T_gen. It estimates the generator torque from the drive's measured
-torque (ACT2): T_gen = T_motor − J_rig·α − B·ω. This works for any inertia ratio, which matters here because a
-MW turbine reflected to a small bench is many times heavier than the bench itself. Set the drive's speed
-ramps (22.02 / 22.03) short, e.g. 0.5 s, and tune the speed controller stiff (autotune), so the drive
-follows the virtual rotor.
+## 🧩 LabVIEW integration
 
-**TORQUE.** The ACS800 runs in torque control (EXT2, REF2, control word bit 11 = 1). The PC sends
-T_ref = T_gen,est + B·ω + r·(T_aero − T_gen,est) with r = J_rig/J_emulated. This observer-based law makes the
-bench accelerate as if it had the turbine's inertia, and it stays stable at large inertia ratios. Plain
-acceleration feedback, T_aero − (J_emu−J_rig)·α, limit-cycles there. Both modes were tested against the
-built-in simulator at 9 and 13 m/s: they reach rated speed, pitch limits power, and there is no oscillation.
+The [`labview/`](labview/) folder contains a native C port of the emulator as **`windemu_32.dll` /
+`windemu_64.dll`** for LabVIEW's Call Library Function Node. The settings from `emulator.properties` are a
+**config cluster** of controls, with the RETA-01 IP as a string and the port in the cluster. Live values
+come back as a **telemetry cluster** of indicators. The DLL runs its own 20 ms real-time thread and has a
+host watchdog that stops the drive if the VI is aborted.
 
-## ACS800 / RETA-01 parameter setup
+```
+WE_DefaultConfig → WE_LoadProperties → WE_Open → loop { WE_SetInputs, WE_GetTelemetry, WE_Command } → WE_Close
+```
 
-> These parameter names are from the ACS800 *standard* control program. Check them against the firmware
-> manual for your version. The RETA-01 values come from its user's manual.
+The cluster layouts and node settings for each function are in **[LABVIEW.md](labview/LABVIEW.md)**.
 
-**Fieldbus link (RETA-01)**
+## 🔌 Drive setup
+
+<details>
+<summary><b>RETA-01 fieldbus parameters</b></summary>
 
 | Par. | Setting |
 |---|---|
 | 98.02 COMM. MODULE LINK | FIELDBUS |
 | 98.07 COMM PROFILE | ABB DRIVES (the only profile on Modbus/TCP) |
-| 51.01 MODULE TYPE | ETHERNET (read-only) |
 | 51.02 COMM RATE | 0 = auto-negotiate |
 | 51.03 DHCP | 0 = off (fixed IP recommended) |
-| 51.04…51.07 | IP address, e.g. 192.168.0.16 (= `drive.host`) |
-| 51.08…51.11 / 51.12…51.15 | Subnet mask / gateway |
+| 51.04…51.07 | IP address, e.g. 192.168.0.16 |
+| 51.08…51.15 | Subnet mask / gateway |
 | 51.16 PROTOCOL | 0 = Modbus/TCP |
-| 51.17 MODBUS TIMEOUT | e.g. 10 (= 1.0 s, unit 100 ms; 0 disables it, so don't use 0) |
+| 51.17 MODBUS TIMEOUT | e.g. 10 (= 1.0 s); don't use 0 |
 | 51.27 FBA PAR REFRESH | REFRESH, to apply the changes |
 
-**Control from fieldbus**
+</details>
+
+<details>
+<summary><b>ACS800 control parameters (standard control program)</b></summary>
 
 | Par. | Setting |
 |---|---|
 | 99.04 MOTOR CTRL MODE | DTC |
 | 99.02 APPLICATION MACRO | FACTORY (SPEED mode) or T CTRL (TORQUE mode) |
-| 10.01 EXT1 STRT/STP/DIR | COMM.CW |
-| 10.02 EXT2 STRT/STP/DIR | COMM.CW |
+| 10.01 / 10.02 EXT1/EXT2 STRT/STP/DIR | COMM.CW |
 | 10.03 REF DIRECTION | FORWARD |
 | 11.02 EXT1/EXT2 SELECT | COMM.CW (bit 11 selects EXT2 = torque) |
-| 11.03 EXT REF1 SELECT | COMM.REF → 11.05 EXT REF1 MAXIMUM = 1500 rpm (= `drive.ref1FullScaleRpm`) |
-| 11.06 EXT REF2 SELECT | COMM.REF → 11.08 EXT REF2 MAXIMUM = 100 % (= `drive.ref2FullScalePct`) |
-| 16.01 RUN ENABLE | YES (or wire your hardware safety chain here) |
+| 11.03 EXT REF1 SELECT | COMM.REF, 11.05 = 1500 rpm |
+| 11.06 EXT REF2 SELECT | COMM.REF, 11.08 = 100 % |
 | 16.04 FAULT RESET SEL | COMM.CW |
-| 30.18 COMM FLT FUNC | FAULT, so the drive stops itself if the PC goes silent |
+| 30.18 COMM FLT FUNC | FAULT |
 | 30.19 MAIN REF DS T-OUT | 1.0 s |
-| 20.01 / 20.02 | Speed limits, at or below `safety.maxMotorRpm` |
-| 20.04 MAXIMUM TORQUE | Your bench's limit |
+| 22.02 / 22.03 | Short ramps (≈ 0.5 s) for SPEED mode |
+| 20.01 / 20.02 / 20.04 | Speed and torque limits of your bench |
 
-**Modbus register map used** (RETA-01: data sets in 40001…40096, parameters at 4GGII)
+> Check these names against the firmware manual for your version.
+
+</details>
+
+<details>
+<summary><b>Modbus register map</b></summary>
 
 | Register | Content | Direction |
 |---|---|---|
-| 40001 | DS1.1 Control Word | PC → drive |
-| 40002 | DS1.2 REF1 (speed, 20000 = 11.05) | PC → drive |
-| 40003 | DS1.3 REF2 (torque, 10000 = 11.08) | PC → drive |
-| 40004 | DS2.1 Status Word | drive → PC |
-| 40005 | DS2.2 ACT1 (speed, 20000 = `drive.act1FullScaleRpm`) | drive → PC |
-| 40006 | DS2.3 ACT2 (torque, 10000 = 100 %) | drive → PC |
+| 40001 | Control Word | PC → drive |
+| 40002 | REF1, speed (20000 = par. 11.05) | PC → drive |
+| 40003 | REF2, torque (10000 = par. 11.08) | PC → drive |
+| 40004 | Status Word | drive → PC |
+| 40005 | ACT1, speed | drive → PC |
+| 40006 | ACT2, torque (10000 = 100 %) | drive → PC |
+| 4GGII | Drive parameter GG.II (e.g. 40102 = 01.02 SPEED) | read / write |
 
-Function codes: FC16 + FC03 per cycle by default, or FC23 in a single telegram (`drive.useFc23=true`).
-Some masters number registers from 1 instead of 0. If the status word reads back as your reference, set
-`drive.registerBase=1`. `DriveLink.readParameter(group, index)` reads any parameter (e.g. 1, 2 → 40102 =
-01.02 SPEED).
+Function codes: FC16 + FC03 per cycle, or FC23 in a single telegram (`drive.useFc23=true`).
+If the status word reads back as your reference, set `drive.registerBase=1`.
 
-## The generator side
+</details>
 
-The emulator replaces only the **turbine**. The generator coupled to the motor needs its own load: a second
-drive, a grid-connected converter, or a resistor bank. Its torque control is the system under test (MPPT,
-grid code, etc.). As a reference, the GUI shows "Gen. torque (MPPT rec.)", the optimal T = k_opt·ω² law
-scaled to the motor shaft. The offline simulator uses that law as the load.
+## 🧪 Testing done
 
-## Commissioning checklist
+| Test | Result |
+|---|---|
+| SPEED and TORQUE mode at 9 and 13 m/s (simulator) | Rated speed reached, pitch limits power, no oscillation |
+| Modbus/TCP frames against an independent fake RETA-01 server | FC16 + FC03 and FC23 verified |
+| Emergency stop → standstill → reset → restart | ✅ |
+| LabVIEW DLLs (32/64-bit Windows) run via LoadLibrary: simulator in both modes + Modbus/TCP | ✅ |
+| Start-up / gust overspeed, 8 cases (light/heavy rotor, 12/15 m/s) | Peak ≤ 9.5 % over rated |
+| Real ACS800 + RETA-01 | ⏳ Not yet. Please report results! |
 
-1. Run with `--sim` first and get to know the GUI, the stop behaviour and the log.
-2. Real drive, motor **uncoupled**: Connect only. The status word should show REMOTE, and the state should go
-   from SWITCH-ON INHIBITED to READY TO SWITCH ON. If it says "not REMOTE", check 98.02 and the
-   local/remote key on the panel.
-3. Lower `safety.maxMotorRpm`, `safety.maxTorquePct` and the drive limits, then Start at low wind.
-4. Check signs and scaling: compare the GUI's motor speed and torque with the drive panel (01.02, 01.05).
-5. Couple the generator, enable its load, then raise the wind step by step.
-6. Test EMERGENCY STOP, pulling the Ethernet cable (the drive must trip on 30.18), and the hardware E-stop.
-
-> **Safety:** this software is not a safety function. The bench must have a hardware emergency stop
-> (Safe Torque Off / main contactor), guarding of the rotating parts, and drive-internal speed and torque
-> limits that hold even if the PC misbehaves.
-
-## Project layout
+## 🗂️ Project structure
 
 ```
 src/main/java/windemu/
-  Main.java                    CLI / GUI launcher
-  config/EmulatorConfig.java   all settings (emulator.properties)
-  modbus/ModbusTcpClient.java  Modbus/TCP master (FC03, 06, 16, 23)
-  drive/AbbDrivesProfile.java  control/status word bits, state names
-  drive/RetaDriveLink.java     RETA-01 data-set & parameter access
-  drive/SimulatedDriveLink.java  offline ACS800 + bench model
-  turbine/WindModel.java       wind: mean, turbulence, gusts, CSV profile
-  turbine/CpModel.java         Cp(λ,β)
-  turbine/PitchController.java pitch PI + feather
-  turbine/WindTurbineModel.java aerodynamics + scaling
-  control/EmulatorController.java real-time loop, state machine, safety, logging
-  ui/EmulatorGui.java, StripChart.java  Swing operator panel
+├── Main.java                       CLI / GUI launcher
+├── config/EmulatorConfig.java      settings from emulator.properties
+├── modbus/ModbusTcpClient.java     Modbus/TCP master (FC03, 06, 16, 23)
+├── drive/
+│   ├── AbbDrivesProfile.java       control/status word bits and states
+│   ├── RetaDriveLink.java          RETA-01 data sets and parameter access
+│   └── SimulatedDriveLink.java     offline ACS800 + bench model
+├── turbine/
+│   ├── WindModel.java              wind: mean, turbulence, gusts, CSV
+│   ├── CpModel.java                Cp(λ, β)
+│   ├── PitchController.java        pitch PI + feathering
+│   └── WindTurbineModel.java       aerodynamics + scaling
+├── control/EmulatorController.java real-time loop, state machine, safety, logging
+└── ui/                             Swing GUI and strip charts
+labview/
+├── src/windemu.h, windemu.c        native DLL (same engine) for LabVIEW
+├── bin/windemu_32.dll, _64.dll     prebuilt DLLs
+├── LABVIEW.md                      clusters, node settings, VI structure
+└── tools/fake_reta01.py            fake RETA-01 Modbus server for tests
 ```
+
+## ⚠️ Safety
+
+This software is **not a safety function**. Before running a real bench, make sure you have:
+
+- a hardware emergency stop (Safe Torque Off / main contactor)
+- guarding of all rotating parts
+- speed and torque limits inside the drive that hold even if the PC misbehaves
+
+Start with the motor uncoupled and reduced limits, and pull the Ethernet cable once to confirm that the drive
+trips on communication loss.
+
+## 🤝 Contributing
+
+Issues and pull requests are welcome, especially test reports from real ACS800 / RETA-01 setups,
+other ABB drives (ACS550, ACS880 with FENA), and further turbine models.
+
+## 📄 License
+
+Add a license of your choice (e.g. MIT) as `LICENSE` before publishing.
+
+## 📚 References
+
+- [ABB RETA-01 Ethernet Adapter Module – User's Manual](https://library.e.abb.com/public/b3b3c13dcead1c3ec12572aa002977cc/en_RETA_01_um_d.pdf)
+- ACS800 Standard Control Program – Firmware Manual (ABB)
+- Slootweg, Polinder, Kling – *Representing wind turbine electrical generating systems in fundamental frequency simulations*, IEEE Trans. Energy Conversion, 2003 (Cp model)
